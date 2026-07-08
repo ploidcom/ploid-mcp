@@ -1,0 +1,1269 @@
+openapi: 3.1.0
+info:
+  title: Ploid Public API
+  version: "1.0.0"
+  description: |
+    Agent-native people search and enrichment API.
+
+    The Ploid Public API lets you search the world's largest living database of
+    people, enrich profiles with verified socials / emails / phones, run
+    long-lived async "People Sets", read LinkedIn data, drive the Ploid agent,
+    and receive webhooks.
+
+    ## Base URL
+
+    ```
+    https://api.ploid.com
+    ```
+
+    ## Authentication
+
+    Every `/v1` endpoint requires an API key. Send it either way:
+
+    - `x-api-key: sk_live_...`
+    - `Authorization: Bearer sk_live_...`
+
+    Keys are scoped. A request that hits an endpoint your key isn't scoped for
+    returns `403 insufficient_scope`. Manage keys and scopes from the Ploid
+    dashboard (Settings → API Keys). An active paid plan (or a Free plan with a
+    saved card for pay-as-you-go) is required to use the API.
+
+    ## Response envelope
+
+    Successful responses wrap the payload in `data`, with request metadata in
+    `meta`:
+
+    ```json
+    { "data": { ... }, "meta": { "request_id": "..." } }
+    ```
+
+    Errors use a consistent shape (HTTP status + machine-readable `code`):
+
+    ```json
+    { "error": { "code": "insufficient_credits", "message": "Out of credits. Top up to continue.", "request_id": "..." } }
+    ```
+
+    ## Credits & billing
+
+    Usage is metered in credits (1 credit = $0.10).
+
+    | Action | Cost |
+    | --- | --- |
+    | Search (per 10 matched results, rounded up) | 1 credit / 10 |
+    | LinkedIn profile / posts | 1 credit |
+    | Social enrichment (github, x, instagram, tiktok, reddit) | 1 credit each |
+    | Work email reveal | 1 credit |
+    | Personal email reveal | 3 credits |
+    | Mobile phone reveal | 10 credits |
+
+    Failed enrichment fields are never billed. Async jobs reserve the worst-case
+    cost up front and settle to the actual amount on completion.
+
+    ## Rate limits
+
+    Two-tier: a per-organization/plan bucket (Free 10/min … Enterprise
+    1000/min) and a per-key fairness bucket (default 100/min, configurable per
+    key). Over the limit returns `429 rate_limited` with a `Retry-After` header.
+
+servers:
+  - url: https://api.ploid.com
+    description: Production
+
+security:
+  - apiKeyAuth: []
+  - bearerAuth: []
+
+tags:
+  - name: Agent
+    description: Drive the Ploid workspace agent (streaming).
+  - name: People
+    description: Search, look up, and enrich people.
+  - name: Search
+    description: Async People Sets (durable, pollable searches).
+  - name: LinkedIn
+    description: LinkedIn profile, search, and post reads.
+  - name: Monitors
+    description: Recurring People Set refreshes.
+  - name: Webhooks
+    description: Register and manage event webhooks.
+  - name: Account
+    description: Credit balance, usage, and key management.
+  - name: Meta
+    description: Machine-readable API definition.
+
+paths:
+  # ── Agent ──────────────────────────────────────────────────────────────
+  /v1/agent/chat:
+    post:
+      operationId: streamAgentChat
+      summary: Stream an agent chat turn
+      description: |
+        Runs the same Ploid workspace agent used by the app and streams AI SDK
+        SSE parts, including `data-subagent` progress records for deep-search
+        fan-out. Requires the `agent:chat` scope.
+      tags: [Agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentChatRequest" }
+      responses:
+        "200":
+          description: AI SDK SSE stream with text, tool, phase, narration, and sub-agent parts.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/agent/chat/cancel:
+    post:
+      operationId: cancelAgentSubagent
+      summary: Cancel one streamed sub-agent
+      description: |
+        Stops one deep-search angle for an in-flight agent chat turn. Use
+        `angle_id: "*"` to stop every angle for the tool call. Requires the
+        `agent:cancel` scope.
+      tags: [Agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentCancelRequest" }
+      responses:
+        "202": { description: Cancel signal accepted. }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+
+  # ── People ─────────────────────────────────────────────────────────────
+  /v1/people/search:
+    post:
+      operationId: searchPeople
+      summary: Search for people (table filters or natural language)
+      description: |
+        Synchronous people search. Use `mode: "table"` with structured filters,
+        or `mode: "natural"` with a free-text query (25–1000 results). Optionally
+        enrich the ranked top rows in-line. Requires the `people:search` scope.
+      tags: [People]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PeopleSearchRequest" }
+      responses:
+        "200":
+          description: Search results.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PeopleSearchResponse" }
+        "402": { $ref: "#/components/responses/InsufficientCredits" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /v1/people/search/criteria:
+    post:
+      operationId: createCriteriaSearch
+      summary: Create an async criteria + evidence search
+      description: |
+        Quality-over-speed cohort search. Returns a `job_id` immediately, then a
+        worker runs criteria evaluation (minutes) and stores the full
+        people + criteria + matches + fit result for polling. Requires the
+        `people:search` scope.
+      tags: [People]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CriteriaSearchRequest" }
+      responses:
+        "202":
+          description: Job queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobQueuedResponse" }
+        "402": { $ref: "#/components/responses/InsufficientCredits" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/people/search/criteria/{id}:
+    get:
+      operationId: getCriteriaSearch
+      summary: Poll an async criteria search
+      tags: [People]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Criteria search status and results. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/people/lookup:
+    post:
+      operationId: lookupPerson
+      summary: Look up a single person by name/company/LinkedIn
+      description: Resolves one person and returns a normalized profile. Requires the `people:lookup` scope.
+      tags: [People]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LookupRequest" }
+      responses:
+        "200":
+          { description: "Lookup result (may be `data: null` when not found)." }
+        "402": { $ref: "#/components/responses/InsufficientCredits" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+
+  /v1/people/enrich:
+    post:
+      operationId: enrichPerson
+      summary: Enrich one person with socials, emails, phone, or profile
+      description: |
+        Reveals requested fields (with per-field evidence) for a single person.
+        Email/phone reveals require a paid plan or a Free plan with a saved card.
+        Only resolved fields are billed. Requires the `people:enrich` scope.
+      tags: [People]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EnrichRequest" }
+      responses:
+        "200": { description: Enrichment result keyed by field. }
+        "402": { $ref: "#/components/responses/InsufficientCredits" }
+        "403": { $ref: "#/components/responses/InsufficientScope" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /v1/people/estimate:
+    post:
+      operationId: estimatePeopleBatchEnrich
+      summary: Estimate a bulk enrichment job
+      tags: [People]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EstimateRequest" }
+      responses:
+        "200":
+          description: Estimated job cost.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EstimateResponse" }
+
+  /v1/people/batch/enrich:
+    post:
+      operationId: createPeopleBatchEnrich
+      summary: Create an async bulk social enrichment job
+      description: Enrich up to 500 people asynchronously. Requires the `batch:write` scope.
+      tags: [People]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BatchEnrichRequest" }
+      responses:
+        "202":
+          description: Job queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BatchCreateResponse" }
+        "402": { description: Insufficient balance or API key budget. }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "503": { description: Background queue unavailable. }
+
+  /v1/people/batch/{id}:
+    get:
+      operationId: getPeopleBatchStatus
+      summary: Poll a batch enrichment job
+      tags: [People]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Job status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BatchStatusResponse" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/people/batch/{id}/results:
+    get:
+      operationId: listPeopleBatchResults
+      summary: Page through batch enrichment results
+      tags: [People]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - {
+            name: cursor,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 0, default: 0 },
+          }
+        - {
+            name: limit,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 1, maximum: 250, default: 100 },
+          }
+      responses:
+        "200": { description: Result page. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ── Searches (People Sets) ───────────────────────────────────────────────
+  /v1/searches:
+    post:
+      operationId: createPeopleSet
+      summary: Create an async People Set (large scriptable search)
+      description: |
+        Kicks off a durable, pollable search job. Supports `mode: "natural"` or
+        `mode: "table"` and 25–1000 results. Requires the `people:search` scope.
+      tags: [Search]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PeopleSetRequest" }
+      responses:
+        "202":
+          description: People Set queued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PeopleSetCreateResponse" }
+        "402": { $ref: "#/components/responses/InsufficientCredits" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+    get:
+      operationId: listPeopleSets
+      summary: List recent People Sets
+      tags: [Search]
+      parameters:
+        - {
+            name: limit,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 25 },
+          }
+      responses:
+        "200": { description: People Sets. }
+
+  /v1/searches/{id}:
+    get:
+      operationId: getPeopleSet
+      summary: Get People Set status
+      tags: [Search]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: People Set status and counts. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/searches/{id}/items:
+    get:
+      operationId: listPeopleSetItems
+      summary: Page through People Set items
+      tags: [Search]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - {
+            name: cursor,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 0, default: 0 },
+          }
+        - {
+            name: limit,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 1, maximum: 100, default: 100 },
+          }
+      responses:
+        "200":
+          { description: Item page with per-row enrichment field statuses. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/searches/{id}/refine:
+    post:
+      operationId: refinePeopleSet
+      summary: Refine an existing People Set into a new one
+      tags: [Search]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RefineRequest" }
+      responses:
+        "202": { description: Refined People Set queued. }
+        "402": { $ref: "#/components/responses/InsufficientCredits" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/searches/{id}/enrichments:
+    post:
+      operationId: enrichPeopleSet
+      summary: Enrich items in a People Set
+      description: Reveal the given fields across a People Set (or a subset of item ids). Requires the `people:enrich` scope.
+      tags: [Search]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PeopleSetEnrichmentRequest" }
+      responses:
+        "202": { description: Enrichment started. }
+        "402": { $ref: "#/components/responses/InsufficientCredits" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/searches/{id}/exports:
+    post:
+      operationId: exportPeopleSet
+      summary: Export a People Set as JSON or CSV
+      tags: [Search]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ExportRequest" }
+      responses:
+        "201": { description: Export payload with inline content. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ── LinkedIn ─────────────────────────────────────────────────────────────
+  /v1/linkedin/profile:
+    get:
+      operationId: getLinkedInProfile
+      summary: Fetch a LinkedIn profile
+      description: Returns a LinkedIn profile by URL, vanity slug, or @handle. Requires the `linkedin:read` scope.
+      tags: [LinkedIn]
+      parameters:
+        - {
+            name: url,
+            in: query,
+            required: false,
+            schema: { type: string },
+            description: "LinkedIn profile URL, slug, or @handle.",
+          }
+        - {
+            name: identifier,
+            in: query,
+            required: false,
+            schema: { type: string },
+            description: "Alias for `url`.",
+          }
+      responses:
+        "200": { description: LinkedIn profile. }
+        "402": { $ref: "#/components/responses/InsufficientCredits" }
+        "404": { description: Profile not found. }
+        "503": { description: LinkedIn data source unavailable. }
+
+  /v1/linkedin/search:
+    post:
+      operationId: searchLinkedInPeople
+      summary: Search LinkedIn people
+      description: Structured LinkedIn people search by keywords, location, title, company, and school. Requires the `linkedin:read` scope.
+      tags: [LinkedIn]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LinkedInSearchRequest" }
+      responses:
+        "200": { description: LinkedIn search results. }
+        "402": { $ref: "#/components/responses/InsufficientCredits" }
+        "503": { description: LinkedIn data source unavailable. }
+
+  /v1/linkedin/posts:
+    get:
+      operationId: listLinkedInPosts
+      summary: List recent LinkedIn posts
+      description: Returns recent posts for a LinkedIn profile. Requires the `linkedin:read` scope.
+      tags: [LinkedIn]
+      parameters:
+        - {
+            name: identifier,
+            in: query,
+            required: false,
+            schema: { type: string },
+            description: "LinkedIn profile URL, slug, or @handle.",
+          }
+        - {
+            name: url,
+            in: query,
+            required: false,
+            schema: { type: string },
+            description: "Alias for `identifier`.",
+          }
+        - {
+            name: limit,
+            in: query,
+            required: false,
+            schema: { type: integer, minimum: 1, maximum: 50, default: 10 },
+          }
+      responses:
+        "200": { description: Recent posts. }
+        "404": { description: Profile not found. }
+        "503": { description: LinkedIn data source unavailable. }
+
+  # ── Monitors ─────────────────────────────────────────────────────────────
+  /v1/monitors:
+    get:
+      operationId: listMonitors
+      summary: List monitors
+      tags: [Monitors]
+      responses:
+        "200": { description: Monitors. }
+    post:
+      operationId: createMonitor
+      summary: Create a recurring People Set monitor
+      description: Re-runs a query (or an existing People Set) on an interval. Requires the `people:search` scope.
+      tags: [Monitors]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MonitorRequest" }
+      responses:
+        "201": { description: Monitor created. }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+
+  /v1/monitors/{id}:
+    delete:
+      operationId: deleteMonitor
+      summary: Disable a monitor
+      tags: [Monitors]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Monitor disabled. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ── Webhooks ─────────────────────────────────────────────────────────────
+  /v1/webhooks:
+    get:
+      operationId: listWebhooks
+      summary: List webhooks
+      tags: [Webhooks]
+      responses:
+        "200": { description: Webhooks. }
+    post:
+      operationId: createWebhook
+      summary: Register a webhook
+      description: |
+        Registers an HTTPS endpoint for event delivery. The URL is validated
+        (SSRF-guarded) and probed with a test POST that must return 2xx.
+        Requires the `webhooks:write` scope.
+      tags: [Webhooks]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookRequest" }
+      responses:
+        "201": { description: Webhook created. }
+        "400": { description: Invalid or unreachable webhook URL. }
+
+  /v1/webhooks/{id}:
+    delete:
+      operationId: deleteWebhook
+      summary: Remove a webhook
+      tags: [Webhooks]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Webhook deleted. }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ── Account ──────────────────────────────────────────────────────────────
+  /v1/account/credits:
+    get:
+      operationId: getCredits
+      summary: Get account balance and API key budget
+      tags: [Account]
+      responses:
+        "200": { description: Credit summary. }
+
+  /v1/account/usage:
+    get:
+      operationId: getUsage
+      summary: Get credit usage and active key count
+      tags: [Account]
+      responses:
+        "200": { description: Usage summary. }
+
+  /v1/account/key:
+    delete:
+      operationId: revokeCurrentKey
+      summary: Revoke the API key used for this request
+      description: Powers `ploid logout`. No-op for session-authenticated callers.
+      tags: [Account]
+      responses:
+        "200": { description: Key revoked. }
+        "400": { description: No API key on the request. }
+
+  # ── Meta ─────────────────────────────────────────────────────────────────
+  /v1/openapi.json:
+    get:
+      operationId: getOpenApiDocument
+      summary: Machine-readable OpenAPI definition
+      tags: [Meta]
+      security: []
+      responses:
+        "200": { description: OpenAPI document. }
+
+components:
+  securitySchemes:
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  responses:
+    InsufficientScope:
+      description: The API key is missing the required scope.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            {
+              error:
+                {
+                  code: insufficient_scope,
+                  message: "API key is missing the people:search scope.",
+                  request_id: "req_123",
+                },
+            }
+    InsufficientCredits:
+      description: Not enough credits / balance to run the request.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            {
+              error:
+                {
+                  code: insufficient_credits,
+                  message: "Out of credits. Top up to continue.",
+                  request_id: "req_123",
+                  available_credits: 0,
+                  required_credits: 5,
+                },
+            }
+    RateLimited:
+      description: Public API rate limit exceeded. Includes a `Retry-After` header.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example:
+            {
+              error:
+                {
+                  code: rate_limited,
+                  message: "Public API rate limit exceeded.",
+                  request_id: "req_123",
+                  retry_after_seconds: 12,
+                },
+            }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ValidationError:
+      description: Request failed validation.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, description: "Machine-readable error code." }
+            message: { type: string }
+            request_id: { type: string }
+          additionalProperties: true
+
+    Meta:
+      type: object
+      description: Envelope metadata returned alongside `data`.
+      properties:
+        request_id: { type: string }
+      additionalProperties: true
+
+    Person:
+      type: object
+      description: Normalized person record.
+      properties:
+        id: { type: string }
+        name: { type: string }
+        headline: { type: [string, "null"] }
+        job_title: { type: [string, "null"] }
+        company: { type: [string, "null"] }
+        location: { type: [string, "null"] }
+        photo_url: { type: [string, "null"] }
+        linkedin_url: { type: [string, "null"] }
+        github_url: { type: [string, "null"] }
+        x_url: { type: [string, "null"] }
+        instagram_url: { type: [string, "null"] }
+        tiktok_url: { type: [string, "null"] }
+        website_url: { type: [string, "null"] }
+        match_score: { type: [number, "null"] }
+        match_reasons: { type: [array, "null"], items: { type: string } }
+        summary: { type: [string, "null"] }
+        profile_url: { type: [string, "null"] }
+        source: { type: string, example: ploid }
+        last_refreshed_at: { type: [string, "null"], format: date-time }
+
+    IncludeField:
+      type: string
+      enum:
+        [
+          profile,
+          work_email,
+          personal_email,
+          mobile_phone,
+          github,
+          x,
+          instagram,
+          tiktok,
+          reddit,
+        ]
+
+    AgentChatRequest:
+      type: object
+      description: Either `query` or `messages` is required.
+      properties:
+        query: { type: string, description: "Single user prompt." }
+        messages:
+          type: array
+          description: "Advanced: AI SDK UIMessage history."
+          items: { type: object, additionalProperties: true }
+        session_id:
+          {
+            type: string,
+            description: "Stable chat/thread id. Generated when omitted.",
+          }
+        mode:
+          {
+            type: string,
+            enum: [people, signals, diagnostics],
+            default: people,
+          }
+        model: { type: string, enum: [atlas, fast], default: atlas }
+        skill_id:
+          {
+            type: string,
+            description: "Optional workspace skill id or slug to activate.",
+          }
+      anyOf:
+        - { required: [query] }
+        - { required: [messages] }
+
+    AgentCancelRequest:
+      type: object
+      required: [chat_id, tool_call_id, angle_id]
+      properties:
+        chat_id:
+          {
+            type: string,
+            description: "The `session_id` used for the chat stream.",
+          }
+        tool_call_id:
+          {
+            type: string,
+            description: "The tool call id that emitted sub-agent events.",
+          }
+        angle_id:
+          {
+            type: string,
+            description: "Sub-agent angle id, or `*` to stop all angles.",
+          }
+
+    PeopleSearchRequest:
+      type: object
+      properties:
+        mode: { type: string, enum: [table, natural], default: table }
+        query:
+          type: string
+          description: "Free-text query. Natural mode drives criteria extraction; table mode parses role/location terms into filters."
+        filters:
+          type: object
+          additionalProperties: true
+          description: "Structured filters (table mode): jobTitles, seniority, locations, companies, education, keywords."
+        page:
+          type: object
+          properties:
+            size:
+              {
+                type: integer,
+                minimum: 1,
+                maximum: 1000,
+                description: "Natural mode supports 25–1000.",
+              }
+            cursor: { type: string }
+        include:
+          type: array
+          items: { $ref: "#/components/schemas/IncludeField" }
+          default: []
+        criteria:
+          type: array
+          maxItems: 20
+          description: "Explicit criteria checklist for natural mode."
+          items:
+            type: object
+            required: [label]
+            properties:
+              label: { type: string }
+              intent: { type: string, enum: [required, preferred, excluded] }
+              kind: { type: string, enum: [lookup, semantic] }
+              value: { type: string }
+        enrich:
+          type: array
+          maxItems: 7
+          items:
+            {
+              type: string,
+              enum:
+                [
+                  work_email,
+                  mobile_phone,
+                  github,
+                  x,
+                  instagram,
+                  tiktok,
+                  reddit,
+                ],
+            }
+          default: []
+
+    PeopleSearchResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items: { $ref: "#/components/schemas/Person" }
+        meta:
+          allOf:
+            - $ref: "#/components/schemas/Meta"
+            - type: object
+              properties:
+                total: { type: integer }
+                next_cursor: { type: [string, integer, "null"] }
+                mode: { type: string, enum: [table, natural] }
+                credits_charged: { type: integer }
+                remaining_credits: { type: integer }
+                warnings: { type: array, items: { type: string } }
+
+    CriteriaSearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string, minLength: 1, maxLength: 2000 }
+        count: { type: integer, minimum: 25, maximum: 1000, default: 50 }
+        criteria:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            required: [label]
+            properties:
+              label: { type: string }
+              intent: { type: string, enum: [required, preferred, excluded] }
+              kind: { type: string, enum: [lookup, semantic] }
+              value: { type: string }
+        enrich:
+          type: array
+          maxItems: 7
+          items:
+            {
+              type: string,
+              enum:
+                [
+                  work_email,
+                  mobile_phone,
+                  github,
+                  x,
+                  instagram,
+                  tiktok,
+                  reddit,
+                ],
+            }
+          default: []
+        agent_ceiling: { type: integer, minimum: 1, maximum: 50 }
+        webhook_url: { type: string, format: uri }
+
+    JobQueuedResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            job_id: { type: string }
+            status: { type: string, enum: [queued] }
+            query: { type: string }
+            requested_count: { type: integer }
+            poll_url: { type: string }
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    LookupRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        company: { type: string, maxLength: 200 }
+        linkedin_url: { type: string, format: uri }
+        include:
+          type: array
+          items: { $ref: "#/components/schemas/IncludeField" }
+          default: []
+
+    EnrichRequest:
+      type: object
+      description: Provide `linkedin_url` or `name` to identify the person.
+      properties:
+        person_id: { type: string }
+        name: { type: string, maxLength: 200 }
+        company: { type: string, maxLength: 200 }
+        headline: { type: string, maxLength: 300 }
+        location: { type: string, maxLength: 200 }
+        linkedin_url: { type: string, format: uri }
+        photo_url: { type: string, format: uri }
+        email: { type: string, format: email }
+        fields:
+          type: array
+          minItems: 1
+          default: [profile]
+          items: { $ref: "#/components/schemas/IncludeField" }
+        known_socials:
+          type: object
+          properties:
+            github: { type: string, format: uri }
+            x: { type: string, format: uri }
+            instagram: { type: string, format: uri }
+            tiktok: { type: string, format: uri }
+            reddit: { type: string, format: uri }
+      anyOf:
+        - { required: [linkedin_url] }
+        - { required: [name] }
+
+    BatchField:
+      type: string
+      enum:
+        [
+          linkedin,
+          profile,
+          work_email,
+          personal_email,
+          mobile_phone,
+          github,
+          x,
+          instagram,
+          tiktok,
+          reddit,
+        ]
+
+    BatchOutputField:
+      type: string
+      enum:
+        [
+          name,
+          headline,
+          job_title,
+          company,
+          location,
+          photo_url,
+          linkedin_url,
+          work_email,
+          personal_email,
+          mobile_phone,
+          github_url,
+          x_url,
+          instagram_url,
+          tiktok_url,
+          reddit_url,
+          profile,
+          evidence,
+        ]
+
+    BatchPersonInput:
+      type: object
+      description: Each person needs at least one of identifier, name, linkedin_url, or email.
+      properties:
+        identifier:
+          {
+            type: string,
+            maxLength: 500,
+            description: "Email, LinkedIn URL, social URL/handle, or free-text identifier.",
+          }
+        name: { type: string, maxLength: 200 }
+        company: { type: string, maxLength: 200 }
+        headline: { type: string, maxLength: 300 }
+        location: { type: string, maxLength: 200 }
+        linkedin_url: { type: string, format: uri }
+        photo_url: { type: string, format: uri }
+        email: { type: string, format: email }
+        known_socials:
+          type: object
+          properties:
+            github: { type: string, format: uri }
+            x: { type: string, format: uri }
+            instagram: { type: string, format: uri }
+            tiktok: { type: string, format: uri }
+            reddit: { type: string, format: uri }
+      anyOf:
+        - { required: [identifier] }
+        - { required: [name] }
+        - { required: [linkedin_url] }
+        - { required: [email] }
+
+    EstimateRequest:
+      type: object
+      required: [people]
+      properties:
+        people:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { $ref: "#/components/schemas/BatchPersonInput" }
+        fields:
+          type: array
+          minItems: 1
+          default: [github, x, instagram]
+          items: { $ref: "#/components/schemas/BatchField" }
+        force_refresh: { type: boolean, default: false }
+
+    EstimateResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            operation: { type: string, example: people.batch.enrich }
+            people: { type: integer }
+            fields:
+              {
+                type: array,
+                items: { $ref: "#/components/schemas/BatchField" },
+              }
+            estimated_credits: { type: integer }
+            estimated_cost_cents: { type: integer }
+            estimated_cost_usd: { type: number }
+            budget_ok: { type: boolean }
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    BatchEnrichRequest:
+      type: object
+      required: [people]
+      properties:
+        people:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { $ref: "#/components/schemas/BatchPersonInput" }
+        fields:
+          type: array
+          minItems: 1
+          default: [github, x, instagram]
+          items: { $ref: "#/components/schemas/BatchField" }
+        output_schema:
+          type: array
+          items: { $ref: "#/components/schemas/BatchOutputField" }
+        force_refresh: { type: boolean, default: false }
+        webhook_url: { type: string, format: uri }
+        client_reference_id: { type: string, maxLength: 200 }
+        max_cost_usd: { type: number, minimum: 0 }
+
+    BatchCreateResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            job_id: { type: string }
+            batch_id: { type: string }
+            status: { type: string, enum: [queued] }
+            total: { type: integer }
+            poll_url: { type: string }
+            results_url: { type: string }
+            estimated_duration_seconds: { type: integer }
+            estimated_credits: { type: integer }
+            estimated_cost_usd: { type: number }
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    BatchStatusResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            job_id: { type: string }
+            batch_id: { type: string }
+            status: { type: string, enum: [queued, running, completed, failed] }
+            total: { type: integer }
+            completed: { type: integer }
+            failed: { type: integer }
+            found: { type: integer }
+            credits_charged: { type: integer }
+            cost_usd: { type: number }
+            progress:
+              type: object
+              properties:
+                total: { type: integer }
+                completed: { type: integer }
+                percent: { type: integer }
+            results_url: { type: string }
+            created_at: { type: string, format: date-time }
+            completed_at: { type: [string, "null"], format: date-time }
+            error: { type: [string, "null"] }
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    PeopleSetRequest:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        mode: { type: string, enum: [table, natural], default: natural }
+        query: { type: string }
+        filters: { type: object, additionalProperties: true }
+        count:
+          {
+            type: integer,
+            minimum: 25,
+            maximum: 1000,
+            description: "Falls back to page.size when omitted.",
+          }
+        page:
+          type: object
+          properties:
+            size: { type: integer, minimum: 1, maximum: 1000 }
+        include:
+          type: array
+          items: { $ref: "#/components/schemas/IncludeField" }
+          default: []
+        webhook_url: { type: string, format: uri }
+
+    PeopleSetCreateResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            people_set_id: { type: string }
+            object: { type: string, example: people_set }
+            status: { type: string, example: pending }
+            requested_count: { type: integer }
+            credits_reserved: { type: integer }
+            poll_url: { type: string }
+            items_url: { type: string }
+            workspace_list_id: { type: [string, "null"] }
+        meta: { $ref: "#/components/schemas/Meta" }
+
+    RefineRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string, minLength: 1, maxLength: 1000 }
+        behavior: { type: string, enum: [append, replace], default: replace }
+        count: { type: integer, minimum: 25, maximum: 1000 }
+        webhook_url: { type: string, format: uri }
+
+    PeopleSetEnrichmentRequest:
+      type: object
+      required: [fields]
+      properties:
+        fields:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/IncludeField" }
+        item_ids:
+          type: array
+          maxItems: 1000
+          items: { type: string }
+          description: "Optional subset of item ids. Omit to enrich the whole set."
+
+    ExportRequest:
+      type: object
+      properties:
+        format: { type: string, enum: [json, csv], default: json }
+
+    LinkedInSearchFilters:
+      type: object
+      properties:
+        keywords: { type: string, maxLength: 500 }
+        location:
+          {
+            oneOf: [{ type: string }, { type: array, items: { type: string } }],
+          }
+        title:
+          {
+            oneOf: [{ type: string }, { type: array, items: { type: string } }],
+          }
+        currentCompany:
+          {
+            oneOf: [{ type: string }, { type: array, items: { type: string } }],
+          }
+        school:
+          {
+            oneOf: [{ type: string }, { type: array, items: { type: string } }],
+          }
+
+    LinkedInSearchRequest:
+      type: object
+      properties:
+        filters: { $ref: "#/components/schemas/LinkedInSearchFilters" }
+        limit: { type: integer, minimum: 1, maximum: 100, default: 25 }
+        cursor:
+          {
+            type: string,
+            description: "Pagination cursor from a previous response.",
+          }
+
+    MonitorRequest:
+      type: object
+      description: Provide `query` or `people_set_id`.
+      properties:
+        people_set_id: { type: string }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        query: { type: string, minLength: 1, maxLength: 1000 }
+        filters: { type: object, additionalProperties: true }
+        interval_days: { type: integer, minimum: 1, maximum: 90, default: 7 }
+        webhook_url: { type: string, format: uri }
+
+    WebhookRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url:
+          {
+            type: string,
+            format: uri,
+            description: "HTTPS URL to receive POST events.",
+          }
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+              - batch.completed
+              - people_set.completed
+              - people_set.failed
+              - set.item.created
+              - set.item.enriched
+              - set.search.completed
+              - set.idle
+              - set.export.completed
+        secret:
+          {
+            type: string,
+            minLength: 16,
+            description: "Shared secret for HMAC (X-Ploid-Signature: sha256=...) verification.",
+          }
