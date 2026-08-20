@@ -1,9 +1,55 @@
-import type { Context } from 'hono'
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
-/** Ploid API key scopes this server's tools need (docs/README.md → Authentication). */
-export const PLOID_SCOPES = ['people:search', 'people:lookup', 'people:enrich', 'account:read'] as const
+export const DEFAULT_BASE_URL = "https://api.ploid.com";
 
-/** External base URL of this server, for discovery metadata and OAuth endpoints. */
-export function baseUrl(c: Context): string {
-  return process.env.BASE_URL ?? new URL(c.req.url).origin
+type FileConfig = { api_key?: string; base_url?: string };
+
+export function configPath(): string {
+  const configured = process.env.XDG_CONFIG_HOME;
+  const root = configured?.trim() ? configured : join(homedir(), ".config");
+  return join(root, "ploid", "config.json");
+}
+
+function readConfig(): FileConfig {
+  try {
+    const value = JSON.parse(readFileSync(configPath(), "utf8")) as unknown;
+    return value && typeof value === "object" ? value as FileConfig : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeConfig(path: string, value: FileConfig): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  // writeFile's mode applies only when creating a file. Tighten an existing
+  // config as well so a previously permissive mode cannot expose the key.
+  chmodSync(path, 0o600);
+}
+
+export function resolveConfig(): { apiKey?: string; baseUrl: string } {
+  const file = readConfig();
+  return {
+    apiKey: process.env.PLOID_API_KEY ?? file.api_key,
+    baseUrl: (process.env.PLOID_API_BASE_URL ?? file.base_url ?? DEFAULT_BASE_URL).replace(/\/+$/, ""),
+  };
+}
+
+export function saveCredentials(apiKey: string, baseUrl: string): string {
+  const path = configPath();
+  const next: FileConfig = { ...readConfig(), api_key: apiKey };
+  if (baseUrl !== DEFAULT_BASE_URL) next.base_url = baseUrl;
+  writeConfig(path, next);
+  return path;
+}
+
+export function clearCredentials(): boolean {
+  const path = configPath();
+  const current = readConfig();
+  if (!current.api_key) return false;
+  delete current.api_key;
+  writeConfig(path, current);
+  return true;
 }
