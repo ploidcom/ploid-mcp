@@ -13,6 +13,21 @@ type DeviceToken =
   | { status: "pending" | "slow_down" | "denied" | "expired"; interval?: number }
   | { status: "approved"; api_key: string };
 
+class DeviceHttpError extends Error {
+  constructor(message: string, readonly status: number, readonly retryAfterMs?: number) {
+    super(message);
+  }
+}
+
+function retryAfterMs(response: Response): number | undefined {
+  const value = response.headers.get("retry-after");
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1_000;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
+}
+
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const response = await fetch(url, {
     method: "POST",
@@ -20,7 +35,13 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
-  if (!response.ok) throw new Error(typeof payload.message === "string" ? payload.message : `Request failed (${response.status})`);
+  if (!response.ok) {
+    throw new DeviceHttpError(
+      typeof payload.message === "string" ? payload.message : `Request failed (${response.status})`,
+      response.status,
+      retryAfterMs(response),
+    );
+  }
   return payload as T;
 }
 
@@ -50,7 +71,19 @@ export async function browserLogin(baseUrl: string, open = true): Promise<string
   let intervalMs = Math.max(1, start.interval) * 1000;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    const token = await postJson<DeviceToken>(`${authBase}/token`, { device_code: start.device_code });
+    let token: DeviceToken;
+    try {
+      token = await postJson<DeviceToken>(`${authBase}/token`, { device_code: start.device_code });
+    } catch (error) {
+      const transient = !(error instanceof DeviceHttpError)
+        || error.status === 408
+        || error.status === 429
+        || error.status >= 500;
+      if (!transient) throw error;
+      const requestedDelay = error instanceof DeviceHttpError ? error.retryAfterMs ?? 0 : 0;
+      intervalMs = Math.min(30_000, Math.max(intervalMs + 2_000, requestedDelay));
+      continue;
+    }
     if (token.status === "pending") continue;
     if (token.status === "slow_down") {
       intervalMs += 2_000;

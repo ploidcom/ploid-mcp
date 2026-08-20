@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -21,6 +21,14 @@ function readConfig(): FileConfig {
   }
 }
 
+function writeConfig(path: string, value: FileConfig): void {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  // writeFile's mode applies only when creating a file. Tighten an existing
+  // config as well so a previously permissive mode cannot expose the key.
+  chmodSync(path, 0o600);
+}
+
 export function resolveConfig(): { apiKey?: string; baseUrl: string } {
   const file = readConfig();
   return {
@@ -33,8 +41,7 @@ export function saveCredentials(apiKey: string, baseUrl: string): string {
   const path = configPath();
   const next: FileConfig = { ...readConfig(), api_key: apiKey };
   if (baseUrl !== DEFAULT_BASE_URL) next.base_url = baseUrl;
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  writeConfig(path, next);
   return path;
 }
 
@@ -43,7 +50,6 @@ export function clearCredentials(): boolean {
   const current = readConfig();
   if (!current.api_key) return false;
   delete current.api_key;
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(current, null, 2)}\n`, { mode: 0o600 });
+  writeConfig(path, current);
   return true;
 }
