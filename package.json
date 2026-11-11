@@ -1,0 +1,51 @@
+{
+    "name": "@ploid/mcp",
+    "version": "0.3.0",
+    "description": "Ploid people intelligence for MCP-compatible agents.",
+    "type": "module",
+    "license": "MIT",
+    "homepage": "https://ploid.com",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/ploidcom/ploid-mcp.git"
+    },
+    "bin": {
+        "ploid-mcp": "./dist/cli.js"
+    },
+    "exports": {
+        ".": {
+            "types": "./dist/server.d.ts",
+            "import": "./dist/server.js"
+        }
+    },
+    "files": [
+        "dist",
+        "README.md",
+        "LICENSE"
+    ],
+    "engines": {
+        "node": ">=20"
+    },
+    "scripts": {
+        "build": "tsup && node scripts/check-standalone.mjs",
+        "dev": "tsx src/cli.ts",
+        "typecheck": "tsc --noEmit",
+        "test": "vitest run",
+        "prepublishOnly": "pnpm build"
+    },
+    "dependencies": {
+        "zod": "^4.2.0",
+        "@modelcontextprotocol/server": "2.0.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.14.0",
+        "tsup": "^8.2.4",
+        "tsx": "^4.16.0",
+        "typescript": "^5.5.4",
+        "vitest": "^2.0.5"
+    },
+    "bugs": {
+        "url": "https://github.com/ploidcom/ploid-mcp/issues"
+    },
+    "packageManager": "pnpm@9.15.0"
+}
